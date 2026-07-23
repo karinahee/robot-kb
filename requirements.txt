@@ -42,3 +42,9 @@ traitlets==5.15.1
 typing-extensions==4.16.0
 urllib3==2.7.0
 wcwidth==0.8.2
+
+# RAG
+python-dotenv>=1.0.0
+supabase>=2.6.0
+streamlit>=1.40.0
+psycopg2-binary>=2.9.0

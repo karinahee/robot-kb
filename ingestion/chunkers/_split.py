@@ -70,9 +70,11 @@ def chunk_text(
     chunks = []
     buf_start = buf_end = None
     chunk_index = 0
+    # 暂存首个短 chunk，等待与第一个正常 chunk 合并
+    pending_first_start = pending_first_end = None
 
     def flush(b_start, b_end):
-        nonlocal chunk_index
+        nonlocal chunk_index, pending_first_start, pending_first_end
         if b_start is None:
             return
         chunk_str = text[b_start:b_end]
@@ -86,7 +88,15 @@ def chunk_text(
             prev['char_len'] = len(prev['chunk_text'])
             return
         if len(chunk_str.strip()) < min_chars and not chunks:
-            return  # 首个 chunk 太短，丢弃
+            # 首个短 chunk：暂存而非丢弃，等待与后一个 chunk 合并
+            pending_first_start = b_start
+            pending_first_end = b_end
+            return
+        # 有暂存的首个短片段时，将其合并进当前 chunk
+        if pending_first_start is not None and not chunks:
+            b_start = pending_first_start
+            chunk_str = text[b_start:b_end]
+            pending_first_start = pending_first_end = None
         chunks.append({
             'doc_id': doc_id,
             'chunk_index': chunk_index,
@@ -135,4 +145,18 @@ def chunk_text(
         else:
             buf_end = p_end
     flush_or_split(buf_start, buf_end)
+
+    # 处理结束时仍有暂存的首个短片段：作为独立 chunk 保留
+    if pending_first_start is not None and not chunks:
+        chunk_str = text[pending_first_start:pending_first_end]
+        if chunk_str.strip():
+            chunks.append({
+                'doc_id': doc_id,
+                'chunk_index': chunk_index,
+                'char_start': pending_first_start,
+                'char_end': pending_first_end,
+                'chunk_text': chunk_str,
+                'char_len': len(chunk_str),
+            })
+
     return chunks

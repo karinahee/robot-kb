@@ -5,12 +5,13 @@
 # 已知局限：
 # - 数学公式（矢量图形）无法提取，为系统 limitation
 # - 表格只提取纯文本，不还原结构
+# - 不做标题识别（pdfminer 提取的文本无可靠结构信息）
 #
 # 依赖：pip install pdfminer.six
 #
 # 架构定位：
-# - 本模块只负责「提取 → 转 Markdown」
-# - 切分统一由上层调用 chunk_markdown 完成
+# - 本模块只负责「提取 → 清洗纯文本」
+# - 切分由上层调用 chunk_text 完成（不经过 Markdown 转换）
 
 import re
 from io import StringIO
@@ -31,47 +32,110 @@ def _raw_text(pdf_path: str) -> str:
     return output.getvalue()
 
 
-def _to_markdown(raw_text: str) -> str:
-    """把 pdfminer 输出的原始文本转换为简单 Markdown。
+def _clean(raw_text: str) -> str:
+    """清洗 pdfminer 原始文本，输出干净的纯文本段落。
 
-    规则：
-    - 连续多个换行 → 段落分隔（空行）
-    - 块内断行合并为空格（处理 PDF 软换行）
-    - 疑似标题行（短行、首字母大写、无句末标点）→ 加 ## 前缀
+    清洗规则：
+    1. 过滤 (cid:xx) 公式占位符
+    2. 过滤字符间有空格的噪声行（如 arXiv 水印 'l u J'）
+    3. 过滤双栏布局产生的词级碎块（单词数 ≤ 2 且无 CJK 字符）
+    4. 块内软换行合并为空格
+    5. 多余空格压缩
+    6. 相邻块合并：末尾无句末标点且非标题 → 与下一块拼接
     """
-    # 按空行切块
+    # 正则预编译
+    sentence_end = re.compile(r'[。.!?！？…」』）)>\]】：:；;]$')
+    ends_with_hyphen = re.compile(r'-$')
+    has_cjk = re.compile(r'[\u4e00-\u9fff]')
+    # 标题特征：罗马数字 / 阿拉伯数字开头的全大写短句（如 "I. INTRODUCTION"）
+    is_section_heading = re.compile(
+        r'^(?:[IVXLCDM]+\.|[0-9]+(?:\.[0-9]+)*\.?)\s+[A-Z\u4e00-\u9fff]'
+    )
+
+    # ── 第一步：按空行切块，逐块预处理 ──────────────────────────────────────
     blocks = re.split(r'\n{2,}', raw_text)
-    md_parts = []
+    cleaned = []
     for block in blocks:
-        # 块内换行合并为空格
-        merged = re.sub(r'(?<!\n)\n(?!\n)', ' ', block).strip()
-        merged = re.sub(r' {2,}', ' ', merged)
+        # 去掉 (cid:xx) 占位符
+        block = re.sub(r'\(cid:\d+\)', '', block)
+        # 块内软换行合并（英文加空格，中文直接拼，连字符断词去掉连字符）
+        lines_in_block = block.split('\n')
+        merged = ''
+        for ln in lines_in_block:
+            ln = ln.strip()
+            if not ln:
+                continue
+            if not merged:
+                merged = ln
+            elif ends_with_hyphen.search(merged):
+                merged = merged[:-1] + ln
+            elif merged and has_cjk.search(merged[-1]):
+                merged = merged + ln
+            else:
+                merged = merged + ' ' + ln
+        merged = re.sub(r' {2,}', ' ', merged).strip()
         if not merged:
             continue
-        # 疑似标题：长度 < 80、不以句末标点结尾、非纯数字/符号
-        is_heading = (
-            len(merged) < 80
-            and not re.search(r'[。.!?！？]$', merged)
-            and re.search(r'[A-Za-z\u4e00-\u9fff]', merged)
+
+        # 过滤噪声行：每个 token 长度 ≤ 2 且整行长度 < 40（如 'l u J'）
+        tokens = merged.split()
+        if len(tokens) > 1 and all(len(t) <= 2 for t in tokens) and len(merged) < 40:
+            continue
+
+        # 过滤双栏碎块：纯英文、词数 ≤ 2、长度 < 25（双栏排版的列间溢出词）
+        if not has_cjk.search(merged) and len(tokens) <= 2 and len(merged) < 25:
+            continue
+
+        cleaned.append(merged)
+
+    # ── 第二步：合并被排版截断的段落 ─────────────────────────────────────────
+    # 判断一个块是否是"完整段落的结尾"：
+    #   - 以句末标点结尾，或
+    #   - 是标题行（section heading）
+    # 否则视为排版截断，与下一块拼接
+    result = []
+    buf = ''
+
+    for block in cleaned:
+        if not buf:
+            buf = block
+            continue
+
+        # 当前 buf 是否已经"结束"
+        buf_is_complete = (
+            sentence_end.search(buf)
+            or is_section_heading.match(buf)
         )
-        if is_heading:
-            md_parts.append(f'## {merged}')
+
+        if buf_is_complete:
+            result.append(buf)
+            buf = block
         else:
-            md_parts.append(merged)
-    return '\n\n'.join(md_parts)
+            # 未结束，拼接下一块
+            if ends_with_hyphen.search(buf):
+                buf = buf[:-1] + block
+            elif buf and has_cjk.search(buf[-1]):
+                buf = buf + block
+            else:
+                buf = buf + ' ' + block
+
+    if buf:
+        result.append(buf)
+
+    return '\n\n'.join(result)
 
 
-def extract_to_markdown(pdf_path: str) -> str:
-    """从 PDF 文件提取文本，转换为 Markdown 字符串。
+def extract_text(pdf_path: str) -> str:
+    """从 PDF 文件提取并清洗纯文本。
 
     Args:
         pdf_path: PDF 文件路径
 
     Returns:
-        Markdown 格式的文本字符串
+        清洗后的纯文本字符串，段落间以双换行分隔
     """
     raw = _raw_text(pdf_path)
-    return _to_markdown(raw)
+    return _clean(raw)
 
 
 def make_doc_id(filename: str) -> str:

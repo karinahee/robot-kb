@@ -1,6 +1,8 @@
 # GitHub / Gitee 仓库 Markdown 提取模块
 #
-# 通过 API 递归获取仓库中所有 .md 文件，提取文本并切分。
+# 两种使用方式：
+#   fetch_and_chunk()      每个 .md 文件独立 doc_id（原有，保留）
+#   fetch_and_chunk_repo() 整个仓库合并为一篇文档（pipeline 使用）
 #
 # 依赖：
 #   pip install requests
@@ -113,3 +115,80 @@ def fetch_and_chunk(
         print(f'  {md_file["path"]:45s} -> {len(chunks):3d} chunks')
 
     return md_files, all_chunks
+
+
+# ── 仓库合并入库（一个仓库 = 一篇文档）─────────────────────────────────────────
+
+def fetch_and_chunk_repo(
+    url: str,
+    platform: str = 'github',
+    target_chars: int = 500,
+    min_chars: int = 80,
+    max_chars: int = 1000,
+) -> tuple[str, str, list[dict]]:
+    """将整个仓库的所有 .md 文件合并为一篇文档，统一切分。
+
+    所有 chunks 共用一个仓库级 doc_id。
+    每个 chunk 的 metadata 中保留 source_path，用于引用展示。
+
+    Args:
+        url:      GitHub 或 Gitee 仓库链接
+        platform: 'github' 或 'gitee'
+
+    Returns:
+        (doc_id, content, chunks)
+        doc_id:  仓库级文档 ID
+        content: 所有 .md 文件的合并文本（文件间以分隔符隔开）
+        chunks:  切分结果，每条 metadata 含 source_path
+    """
+    if platform == 'github':
+        owner, repo = parse_github_url(url)
+    else:
+        owner, repo = parse_gitee_url(url)
+
+    doc_id = f'{platform}_{owner}_{repo}'.lower()
+
+    md_files = fetch_md_files(owner, repo, platform=platform)
+    if not md_files:
+        raise ValueError(f'仓库中没有找到 .md 文件：{url}')
+
+    # 合并所有文件内容，记录每个文件在合并文本中的偏移范围
+    parts = []
+    file_ranges = []  # [(source_path, file_start, file_end)]
+    offset = 0
+
+    for md_file in md_files:
+        resp = requests.get(md_file['download_url'], timeout=30)
+        resp.raise_for_status()
+        md_text = resp.text.strip()
+        if not md_text:
+            continue
+
+        separator = f'\n\n<!-- file: {md_file["path"]} -->\n\n'
+        parts.append(separator + md_text)
+        file_start = offset + len(separator)
+        file_end = file_start + len(md_text)
+        file_ranges.append((md_file['path'], file_start, file_end))
+        offset = file_end
+
+    content = ''.join(parts)
+
+    # 对合并文本统一切分
+    raw_chunks = chunk_markdown(
+        content, doc_id=doc_id,
+        target_chars=target_chars,
+        min_chars=min_chars,
+        max_chars=max_chars,
+    )
+
+    # 为每个 chunk 注入 source_path（找到 char_start 属于哪个文件）
+    def _find_source_path(char_start: int) -> str:
+        for path, f_start, f_end in file_ranges:
+            if f_start <= char_start < f_end:
+                return path
+        return file_ranges[-1][0] if file_ranges else ''
+
+    for chunk in raw_chunks:
+        chunk['metadata'] = {'source_path': _find_source_path(chunk['char_start'])}
+
+    return doc_id, content, raw_chunks

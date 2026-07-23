@@ -1,0 +1,397 @@
+# Robot-KB Streamlit 测试界面
+#
+# 功能：
+#   侧边栏：添加来源（PDF/URL/GitHub/arXiv）、文档列表、过滤勾选
+#   主区域：单轮问答，回答带脚注引用，引用卡片展示原文
+
+import os
+import re
+import json
+import html
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── 页面配置 ──────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title='Robot-KB',
+    page_icon='◆',
+    layout='wide',
+    initial_sidebar_state='expanded',
+)
+
+# ── 常量 ──────────────────────────────────────────────────────────────────────
+_CHAT_MODEL   = os.environ.get('CHAT_MODEL', 'deepseek-ai/DeepSeek-V3')
+_CHAT_URL     = 'https://api.siliconflow.cn/v1/chat/completions'
+_API_KEY      = os.environ.get('SILICONFLOW_API_KEY', '')
+_LANG_OPTIONS = ['zh', 'en', 'zh-en']
+
+_SOURCE_ICONS = {
+    'pdf':    '📄',
+    'web':    '🌐',
+    'github': '🐙',
+    'arxiv':  '📚',
+}
+
+
+# ── LLM 调用 ──────────────────────────────────────────────────────────────────
+
+def _chat(messages: list[dict], temperature: float = 0.3) -> str:
+    """调 DeepSeek Chat API，返回文本内容。"""
+    headers = {
+        'Authorization': f'Bearer {_API_KEY}',
+        'Content-Type':  'application/json',
+    }
+    payload = {
+        'model':       _CHAT_MODEL,
+        'messages':    messages,
+        'temperature': temperature,
+    }
+    resp = requests.post(_CHAT_URL, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    return resp.json()['choices'][0]['message']['content']
+
+
+def generate_sub_queries(query: str) -> list[str]:
+    """用 LLM 将用户问题改写为 2~3 个检索子查询。"""
+    prompt = (
+        '你是一个检索查询改写助手。'
+        '将用户问题改写为2~3个不同角度的搜索子问题，用于检索知识库。'
+        '直接输出JSON格式：{"queries": ["...", "..."]}，不要输出其他内容。'
+    )
+    try:
+        raw = _chat([
+            {'role': 'system', 'content': prompt},
+            {'role': 'user',   'content': query},
+        ])
+        data = json.loads(raw)
+        queries = data.get('queries', [])
+        return [q.strip() for q in queries if q.strip()][:3]
+    except Exception:
+        return []  # 失败时降级为仅用原始 query
+
+
+def generate_answer(query: str, chunks: list[dict]) -> str:
+    """用 LLM 基于检索结果生成带引用标注的回答。"""
+    context_parts = []
+    for i, c in enumerate(chunks, 1):
+        context_parts.append(
+            f'[{i}] 来源：{c["title"]}（{c["source_type"]}）\n{c["chunk_text"]}'
+        )
+    context = '\n\n'.join(context_parts)
+
+    system = (
+        '你是一个专业的机器人领域知识助手，根据以下参考资料回答用户问题。'
+        '回答时用 [1][2] 等标注引用来源，仅引用参考资料中的内容，'
+        '不要编造参考资料中没有的信息。'
+        '如果参考资料无法回答问题，请明确说明。\n\n'
+        f'参考资料：\n{context}'
+    )
+    return _chat([
+        {'role': 'system', 'content': system},
+        {'role': 'user',   'content': query},
+    ])
+
+
+# ── 入库回调 ──────────────────────────────────────────────────────────────────
+
+def _progress_cb(stage: str, progress: float) -> None:
+    bar = st.session_state.get('progress_bar')
+    label = st.session_state.get('progress_label')
+    if bar:
+        bar.progress(progress)
+    if label:
+        label.text(stage)
+
+
+# ── 入库处理 ──────────────────────────────────────────────────────────────────
+
+def _do_ingest(source_type: str, **kwargs) -> tuple[bool, str]:
+    """统一入库入口，返回 (success, message)。"""
+    from ingestion.pipeline import (
+        ingest_pdf_upload, ingest_web, ingest_arxiv, ingest_github,
+    )
+    try:
+        if source_type == 'pdf':
+            doc_id = ingest_pdf_upload(
+                file_bytes=kwargs['file_bytes'],
+                filename=kwargs['filename'],
+                title=kwargs['title'],
+                lang=kwargs['lang'],
+                on_progress=_progress_cb,
+            )
+        elif source_type == 'web':
+            doc_id = ingest_web(
+                url=kwargs['url'],
+                title=kwargs['title'],
+                lang=kwargs['lang'],
+                on_progress=_progress_cb,
+            )
+        elif source_type == 'arxiv':
+            doc_id = ingest_arxiv(
+                url=kwargs['url'],
+                title=kwargs['title'],
+                lang=kwargs['lang'],
+                on_progress=_progress_cb,
+            )
+        elif source_type == 'github':
+            doc_id = ingest_github(
+                url=kwargs['url'],
+                title=kwargs['title'],
+                lang=kwargs['lang'],
+                on_progress=_progress_cb,
+            )
+        else:
+            return False, f'未知来源类型：{source_type}'
+        return True, doc_id
+    except Exception as e:
+        return False, str(e)
+
+
+# ── 引用渲染 ──────────────────────────────────────────────────────────────────
+
+def _render_answer_with_citations(answer: str, chunks: list[dict]) -> str:
+    """将回答中的 [n] 替换为可点击的 HTML 上标，返回 HTML 字符串。"""
+    def _replace(m):
+        n = int(m.group(1))
+        if 1 <= n <= len(chunks):
+            c = chunks[n - 1]
+            title = html.escape(c.get('title', ''))
+            return (
+                f'<sup style="color:#1a73e8; cursor:pointer; '
+                f'font-size:0.75em;" '
+                f'title="{title}">[{n}]</sup>'
+            )
+        return m.group(0)
+
+    return re.sub(r'\[(\d+)\]', _replace, html.escape(answer))
+
+
+def _render_citation_cards(chunks: list[dict]) -> None:
+    """在回答下方展示引用来源卡片。"""
+    st.markdown('**引用来源**')
+    for i, c in enumerate(chunks, 1):
+        score = c.get('rerank_score', c.get('similarity', 0))
+        title = c.get('title', '')
+        stype = c.get('source_type', '')
+        icon = _SOURCE_ICONS.get(stype, '📎')
+        label = f'{icon} [{i}] {title} · {stype} · score: {score:.3f}'
+
+        with st.expander(label):
+            # 高亮整个 chunk 文本
+            chunk_text = html.escape(c.get('chunk_text', ''))
+            st.markdown(
+                f'<div style="background:#fff9c4; padding:10px; '
+                f'border-radius:6px; border-left:4px solid #f9a825; '
+                f'font-size:0.88em; line-height:1.6; '
+                f'white-space:pre-wrap;">{chunk_text}</div>',
+                unsafe_allow_html=True,
+            )
+            col1, col2, col3 = st.columns(3)
+            col1.caption(f'文档 ID：{c.get("doc_id", "")}')
+            col2.caption(f'语言：{c.get("lang", "")}')
+            col3.caption(f'Chunk #{c.get("chunk_index", "")}')
+
+
+# ── 侧边栏 ────────────────────────────────────────────────────────────────────
+
+def _sidebar() -> list[str] | None:
+    """渲染侧边栏，返回勾选的 doc_id 列表（None 表示全库）。"""
+    from ingestion.store import list_documents, delete_document
+
+    with st.sidebar:
+        st.title('🤖 Robot-KB')
+        st.divider()
+
+        # ── 添加来源 ──────────────────────────────────────────────────────
+        st.subheader('添加来源')
+        source_type = st.selectbox(
+            '来源类型',
+            ['pdf', 'web', 'arxiv', 'github'],
+            format_func=lambda x: {
+                'pdf':    '📄 PDF 文件',
+                'web':    '🌐 网页 URL',
+                'arxiv':  '📚 arXiv 链接',
+                'github': '🐙 GitHub 仓库',
+            }[x],
+        )
+
+        with st.form('ingest_form', clear_on_submit=True):
+            title = st.text_input('文档标题（可选）')
+            lang  = st.selectbox('语言', _LANG_OPTIONS)
+
+            if source_type == 'pdf':
+                uploaded = st.file_uploader('上传 PDF', type=['pdf'])
+                url_val  = ''
+            else:
+                uploaded = None
+                placeholder = {
+                    'web':    'https://example.com/page',
+                    'arxiv':  'https://arxiv.org/abs/2004.00784',
+                    'github': 'https://github.com/owner/repo',
+                }[source_type]
+                url_val = st.text_input('URL', placeholder=placeholder)
+
+            submitted = st.form_submit_button('入库', use_container_width=True)
+
+        if submitted:
+            progress_label = st.empty()
+            progress_bar   = st.progress(0)
+            st.session_state['progress_bar']   = progress_bar
+            st.session_state['progress_label'] = progress_label
+
+            if source_type == 'pdf' and uploaded is None:
+                st.error('请上传 PDF 文件')
+            elif source_type != 'pdf' and not url_val.strip():
+                st.error('请输入 URL')
+            else:
+                kwargs = {'title': title or '', 'lang': lang}
+                if source_type == 'pdf':
+                    kwargs['file_bytes'] = uploaded.read()
+                    kwargs['filename']   = uploaded.name
+                else:
+                    kwargs['url'] = url_val.strip()
+
+                success, result = _do_ingest(source_type, **kwargs)
+                progress_bar.empty()
+                progress_label.empty()
+
+                if success:
+                    st.success(f'入库成功：{result}')
+                    st.rerun()
+                else:
+                    st.error(f'入库失败：{result}')
+
+        st.divider()
+
+        # ── 文档列表 ──────────────────────────────────────────────────────
+        st.subheader('文档库')
+
+        try:
+            docs = list_documents()
+        except Exception as e:
+            st.error(f'读取文档列表失败：{e}')
+            return None
+
+        if not docs:
+            st.caption('暂无文档，请先添加来源。')
+            return None
+
+        selected_ids = []
+        for doc in docs:
+            doc_id  = doc['doc_id']
+            icon    = _SOURCE_ICONS.get(doc['source_type'], '📎')
+            status  = doc.get('status', '')
+            badge   = {'ready': '✅', 'processing': '⏳', 'failed': '❌'}.get(status, '')
+            label   = f'{icon} {doc["title"] or doc_id} {badge}'
+
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                checked = st.checkbox(label, value=True, key=f'chk_{doc_id}')
+            with col2:
+                if st.button('🗑', key=f'del_{doc_id}', help='删除文档'):
+                    delete_document(doc_id)
+                    st.rerun()
+
+            if checked:
+                selected_ids.append(doc_id)
+
+        # 全选 = 全库搜索，返回 None
+        if len(selected_ids) == len(docs):
+            return None
+        return selected_ids
+
+
+# ── 对话区 ────────────────────────────────────────────────────────────────────
+
+def _chat_area(filter_doc_ids: list[str] | None) -> None:
+    from retrieval.search import retrieve
+
+    st.title('Robot-KB')
+    st.caption('基于知识库的单轮问答，支持 PDF / 网页 / arXiv / GitHub 来源')
+
+    # 历史消息（单轮，每次刷新清空）
+    if 'messages' not in st.session_state:
+        st.session_state['messages'] = []
+
+    # 渲染历史
+    for msg in st.session_state['messages']:
+        with st.chat_message(msg['role']):
+            if msg['role'] == 'assistant':
+                st.markdown(msg['content'], unsafe_allow_html=True)
+                if 'chunks' in msg:
+                    _render_citation_cards(msg['chunks'])
+            else:
+                st.markdown(msg['content'])
+
+    # 输入
+    query = st.chat_input('输入问题...')
+    if not query:
+        return
+
+    # 用户消息
+    st.session_state['messages'].append({'role': 'user', 'content': query})
+    with st.chat_message('user'):
+        st.markdown(query)
+
+    with st.chat_message('assistant'):
+        with st.spinner('检索中...'):
+            # 1. 生成子查询
+            sub_queries = generate_sub_queries(query)
+
+            # 2. 检索
+            try:
+                chunks = retrieve(
+                    query=query,
+                    sub_queries=sub_queries,
+                    top_k=5,
+                    filter_doc_ids=filter_doc_ids,
+                )
+            except Exception as e:
+                st.error(f'检索失败：{e}')
+                return
+
+        if not chunks:
+            st.warning('知识库中没有找到相关内容，请先添加来源。')
+            return
+
+        with st.spinner('生成回答...'):
+            # 3. 生成回答
+            try:
+                answer = generate_answer(query, chunks)
+            except Exception as e:
+                st.error(f'生成回答失败：{e}')
+                return
+
+        # 4. 渲染回答（带引用上标）
+        answer_html = _render_answer_with_citations(answer, chunks)
+        st.markdown(answer_html, unsafe_allow_html=True)
+
+        # 5. 引用卡片
+        _render_citation_cards(chunks)
+
+        # 6. 显示子查询（调试用，折叠）
+        if sub_queries:
+            with st.expander('检索子查询（调试）', expanded=False):
+                for q in sub_queries:
+                    st.caption(f'· {q}')
+
+    # 保存到历史
+    st.session_state['messages'].append({
+        'role':    'assistant',
+        'content': answer_html,
+        'chunks':  chunks,
+    })
+
+
+# ── 入口 ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    filter_doc_ids = _sidebar()
+    _chat_area(filter_doc_ids)
+
+
+if __name__ == '__main__':
+    main()
