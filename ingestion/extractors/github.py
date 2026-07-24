@@ -9,6 +9,7 @@
 
 import re
 import time
+import uuid
 import requests
 
 from ..chunkers.chunk import chunk_markdown
@@ -104,7 +105,7 @@ def fetch_and_chunk(
         if not md_text.strip():
             continue
         safe_path = md_file['path'].replace('/', '_').replace('.', '_').lower()
-        doc_id = f'{platform}_{repo}_{safe_path}'
+        doc_id = f'{platform}_{repo}_{safe_path}_{uuid.uuid4().hex[:6]}'
         chunks = chunk_markdown(
             md_text, doc_id=doc_id,
             target_chars=target_chars,
@@ -146,7 +147,8 @@ def fetch_and_chunk_repo(
     else:
         owner, repo = parse_gitee_url(url)
 
-    doc_id = f'{platform}_{owner}_{repo}'.lower()
+    # 每次添加都是全新文档（不自动覆盖），重复仓库由用户自行管理删除
+    doc_id = f'{platform}_{owner}_{repo}_{uuid.uuid4().hex[:6]}'.lower()
 
     md_files = fetch_md_files(owner, repo, platform=platform)
     if not md_files:

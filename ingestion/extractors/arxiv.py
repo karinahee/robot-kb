@@ -11,10 +11,11 @@
 import os
 import re
 import tempfile
+import uuid
 import requests
 import arxiv
 
-from .pdf import extract_text, make_doc_id
+from .pdf import extract_text
 from ..chunkers._split import chunk_text
 
 
@@ -97,7 +98,7 @@ def fetch_and_chunk(
         pdf_path = os.path.join(save_dir, f'arxiv_{arxiv_id}.pdf')
         download_pdf(meta['pdf_url'], pdf_path)
 
-        doc_id = f'arxiv_{arxiv_id}'
+        doc_id = f'arxiv_{arxiv_id}_{uuid.uuid4().hex[:6]}'
         text = extract_text(pdf_path)
         chunks = chunk_text(
             text, doc_id=doc_id,
@@ -161,7 +162,8 @@ def extract_by_url(
         meta:    元信息 dict（arxiv_id, title, authors, published, pdf_url）
     """
     arxiv_id = parse_arxiv_url(url)
-    doc_id = f'arxiv_{arxiv_id.replace(".", "_").replace("/", "_")}'
+    # 每次添加都是全新文档（不自动覆盖），重复链接由用户自行管理删除
+    doc_id = f'arxiv_{arxiv_id.replace(".", "_").replace("/", "_")}_{uuid.uuid4().hex[:6]}'
 
     # 获取元信息
     client = arxiv.Client()

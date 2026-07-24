@@ -1,19 +1,23 @@
-# 最后选用 pdfminer.six：
-# - 纯规则驱动，无需深度学习模型，安装简单
-# - 解决了 pymupdf 提取双栏效果不佳的问题
-#
-# 已知局限：
-# - 数学公式（矢量图形）无法提取，为系统 limitation
-# - 表格只提取纯文本，不还原结构
-# - 不做标题识别（pdfminer 提取的文本无可靠结构信息）
-#
-# 依赖：pip install pdfminer.six
-#
-# 架构定位：
-# - 本模块只负责「提取 → 清洗纯文本」
-# - 切分由上层调用 chunk_text 完成（不经过 Markdown 转换）
+# 定位：
+# 1. 本模块只负责「提取 → 清洗纯文本」
+# 2. 切分由上层调用 chunk_text 完成
+
+"""
+最后选用 pdfminer.six：
+- 纯规则驱动，无需深度学习模型，对比 unstructured 安装简单
+- 解决了 pymupdf 提取双栏效果不佳的问题
+
+局限性：
+- 数学公式（矢量图形）无法提取，为系统 limitation
+- 表格只提取纯文本，不还原结构
+- 不做标题识别（pdfminer 提取的文本无可靠结构信息）
+
+依赖：pip install pdfminer.six
+
+"""
 
 import re
+import uuid
 from io import StringIO
 from pdfminer.high_level import extract_text_to_fp
 from pdfminer.layout import LAParams
@@ -139,7 +143,10 @@ def extract_text(pdf_path: str) -> str:
 
 
 def make_doc_id(filename: str) -> str:
-    """从文件名生成 doc_id，去掉特殊字符，加 pdf_ 前缀。"""
+    """从文件名生成 doc_id：pdf_清洗名_随机短码。
+
+    每次上传都是全新文档（不自动覆盖），同名/同内容文档由用户自行管理删除。
+    """
     name = filename.lower().replace('.pdf', '')
     clean = re.sub(r'[^a-z0-9]', '_', name)[:50]
-    return f'pdf_{clean}'
+    return f'pdf_{clean}_{uuid.uuid4().hex[:6]}'

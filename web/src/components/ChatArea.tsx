@@ -290,7 +290,7 @@ export function ChatArea() {
               <div className="flex items-center gap-2">
                 <ModeSelect mode={mode} onChange={setMode} />
                 <button className="flex items-center gap-1 rounded-full border border-neutral-200 px-3 py-1.5 text-xs text-neutral-500 transition hover:bg-neutral-50">
-                  @上下文
+                  @来源
                 </button>
               </div>
               <div className="flex items-center gap-1.5">

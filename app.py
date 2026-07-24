@@ -1,8 +1,8 @@
 # Robot-KB Streamlit 测试界面
 #
 # 功能：
-#   侧边栏：添加来源（PDF/URL/GitHub/arXiv）、文档列表、过滤勾选
-#   主区域：单轮问答，回答带脚注引用，引用卡片展示原文
+#   侧边栏：速问/全搜模式切换、添加来源（PDF/URL/GitHub/arXiv）、文档列表、勾选批量删除
+#   主区域：@文档限定范围、单轮问答带引用
 
 import os
 import re
@@ -17,7 +17,6 @@ load_dotenv()
 # ── 页面配置 ──────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title='Robot-KB',
-    page_icon='◆',
     layout='wide',
     initial_sidebar_state='expanded',
 )
@@ -26,14 +25,6 @@ st.set_page_config(
 _CHAT_MODEL   = os.environ.get('CHAT_MODEL', 'deepseek-ai/DeepSeek-V3')
 _CHAT_URL     = 'https://api.siliconflow.cn/v1/chat/completions'
 _API_KEY      = os.environ.get('SILICONFLOW_API_KEY', '')
-_LANG_OPTIONS = ['zh', 'en', 'zh-en']
-
-_SOURCE_ICONS = {
-    'pdf':    '📄',
-    'web':    '🌐',
-    'github': '🐙',
-    'arxiv':  '📚',
-}
 
 
 # ── LLM 调用 ──────────────────────────────────────────────────────────────────
@@ -176,51 +167,76 @@ def _render_citation_cards(chunks: list[dict]) -> None:
         score = c.get('rerank_score', c.get('similarity', 0))
         title = c.get('title', '')
         stype = c.get('source_type', '')
-        icon = _SOURCE_ICONS.get(stype, '📎')
-        label = f'{icon} [{i}] {title} · {stype} · score: {score:.3f}'
+        label = f'[{i}] {title} · {stype} · score: {score:.3f}'
 
-        with st.expander(label):
-            # 高亮整个 chunk 文本
-            chunk_text = html.escape(c.get('chunk_text', ''))
-            st.markdown(
-                f'<div style="background:#fff9c4; padding:10px; '
-                f'border-radius:6px; border-left:4px solid #f9a825; '
-                f'font-size:0.88em; line-height:1.6; '
-                f'white-space:pre-wrap;">{chunk_text}</div>',
-                unsafe_allow_html=True,
-            )
-            col1, col2, col3 = st.columns(3)
-            col1.caption(f'文档 ID：{c.get("doc_id", "")}')
-            col2.caption(f'语言：{c.get("lang", "")}')
-            col3.caption(f'Chunk #{c.get("chunk_index", "")}')
+        st.markdown(f'**{label}**')
+        # 高亮整个 chunk 文本
+        chunk_text = html.escape(c.get('chunk_text', ''))
+        st.markdown(
+            f'<div style="background:#fff9c4; padding:10px; '
+            f'border-radius:6px; border-left:4px solid #f9a825; '
+            f'font-size:0.88em; line-height:1.6; '
+            f'white-space:pre-wrap;">{chunk_text}</div>',
+            unsafe_allow_html=True,
+        )
+        col1, col2, col3 = st.columns(3)
+        col1.caption(f'文档 ID：{c.get("doc_id", "")}')
+        col2.caption(f'语言：{c.get("lang", "")}')
+        col3.caption(f'Chunk #{c.get("chunk_index", "")}')
 
 
 # ── 侧边栏 ────────────────────────────────────────────────────────────────────
 
-def _sidebar() -> list[str] | None:
-    """渲染侧边栏，返回勾选的 doc_id 列表（None 表示全库）。"""
+def _sidebar() -> None:
+    """渲染侧边栏；勾选仅用于批量删除，检索始终为全库。"""
     from ingestion.store import list_documents, delete_document
 
     with st.sidebar:
-        st.title('🤖 Robot-KB')
+        # 调宽侧边栏（仅展开态生效）+ 红色文字按钮样式 + 内容置顶
+        st.markdown(
+            '<style>'
+            '[data-testid="stSidebar"][aria-expanded="true"] {'
+            '  width: 340px;'
+            '}'
+            '[data-testid="stSidebar"][aria-expanded="false"] {'
+            '  width: 0; min-width: 0;'
+            '}'
+            '[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {'
+            '  padding-top: 0.5rem;'
+            '}'
+            'button[kind="tertiary"] {color: #d32f2f; padding: 0;}'
+            '</style>',
+            unsafe_allow_html=True,
+        )
+
+        # ── 检索模式（速问/全搜，置顶）───────────────────────────────────
+        st.segmented_control(
+            '检索模式',
+            options=['quick', 'full'],
+            format_func=lambda x: {'quick': '速问', 'full': '全搜'}[x],
+            default='quick',
+            key='search_mode',
+            label_visibility='collapsed',
+        )
         st.divider()
 
-        # ── 添加来源 ──────────────────────────────────────────────────────
+        # ── 添加来源 ────────────────────────────────────────────────────
         st.subheader('添加来源')
         source_type = st.selectbox(
             '来源类型',
             ['pdf', 'web', 'arxiv', 'github'],
             format_func=lambda x: {
-                'pdf':    '📄 PDF 文件',
-                'web':    '🌐 网页 URL',
-                'arxiv':  '📚 arXiv 链接',
-                'github': '🐙 GitHub 仓库',
+                'pdf':    'PDF 文件',
+                'web':    '网页 URL',
+                'arxiv':  'arXiv 链接',
+                'github': 'GitHub 仓库',
             }[x],
+            label_visibility='collapsed',
         )
 
         with st.form('ingest_form', clear_on_submit=True):
             title = st.text_input('文档标题（可选）')
-            lang  = st.selectbox('语言', _LANG_OPTIONS)
+            lang  = 'zh-en'
 
             if source_type == 'pdf':
                 uploaded = st.file_uploader('上传 PDF', type=['pdf'])
@@ -267,50 +283,52 @@ def _sidebar() -> list[str] | None:
         st.divider()
 
         # ── 文档列表 ──────────────────────────────────────────────────────
-        st.subheader('文档库')
-
         try:
             docs = list_documents()
         except Exception as e:
             st.error(f'读取文档列表失败：{e}')
-            return None
+            return
 
         if not docs:
+            st.subheader('文档库')
             st.caption('暂无文档，请先添加来源。')
-            return None
+            return
 
-        selected_ids = []
-        for doc in docs:
-            doc_id  = doc['doc_id']
-            icon    = _SOURCE_ICONS.get(doc['source_type'], '📎')
-            status  = doc.get('status', '')
-            badge   = {'ready': '✅', 'processing': '⏳', 'failed': '❌'}.get(status, '')
-            label   = f'{icon} {doc["title"] or doc_id} {badge}'
+        # 当前勾选的文档（checkbox 状态存于 session_state）
+        selected_ids = [
+            d['doc_id'] for d in docs
+            if st.session_state.get(f'chk_{d["doc_id"]}')
+        ]
 
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                checked = st.checkbox(label, value=True, key=f'chk_{doc_id}')
-            with col2:
-                if st.button('🗑', key=f'del_{doc_id}', help='删除文档'):
+        # 标题行：勾选后右侧出现红色「删除」，点击批量删除
+        head1, head2 = st.columns([3, 1])
+        with head1:
+            st.subheader('文档库')
+        with head2:
+            if selected_ids and st.button('删除', type='tertiary', help='删除勾选的文档'):
+                for doc_id in selected_ids:
                     delete_document(doc_id)
-                    st.rerun()
+                    st.session_state.pop(f'chk_{doc_id}', None)
+                st.rerun()
 
-            if checked:
-                selected_ids.append(doc_id)
-
-        # 全选 = 全库搜索，返回 None
-        if len(selected_ids) == len(docs):
-            return None
-        return selected_ids
+        for doc in docs:
+            doc_id = doc['doc_id']
+            status = doc.get('status', '')
+            badge  = {'ready': '', 'processing': '（入库中）', 'failed': '（失败）'}.get(status, '')
+            st.checkbox(
+                f'{doc["title"] or doc_id}{badge}',
+                value=False,
+                key=f'chk_{doc_id}',
+            )
 
 
 # ── 对话区 ────────────────────────────────────────────────────────────────────
 
-def _chat_area(filter_doc_ids: list[str] | None) -> None:
+def _chat_area() -> None:
     from retrieval.search import retrieve
 
     st.title('Robot-KB')
-    st.caption('基于知识库的单轮问答，支持 PDF / 网页 / arXiv / GitHub 来源')
+    st.caption('机器人运控知识库问答系统')
 
     # 历史消息（单轮，每次刷新清空）
     if 'messages' not in st.session_state:
@@ -326,6 +344,34 @@ def _chat_area(filter_doc_ids: list[str] | None) -> None:
             else:
                 st.markdown(msg['content'])
 
+    # ── @文档（输入框上方右侧）────────────────────────────────────────────
+    from ingestion.store import list_documents
+    docs = list_documents()
+    # 从 checkbox 状态派生已选定的文档 id
+    mention_ids = [
+        d['doc_id'] for d in docs
+        if st.session_state.get(f'mention_{d["doc_id"]}')
+    ]
+
+    _, doc_col = st.columns([6, 1])
+    with doc_col:
+        pop_label = '@文档' + (f'（{len(mention_ids)}）' if mention_ids else '')
+        with st.popover(pop_label, use_container_width=True):
+            if not docs:
+                st.caption('文档库为空，请先在左侧添加来源。')
+            for d in docs:
+                st.checkbox(
+                    d['title'] or d['doc_id'],
+                    value=d['doc_id'] in mention_ids,
+                    key=f'mention_{d["doc_id"]}',
+                )
+    if mention_ids:
+        titles = [
+            d['title'] or d['doc_id'] for d in docs
+            if d['doc_id'] in mention_ids
+        ]
+        st.caption('已限定范围：' + '、'.join(titles))
+
     # 输入
     query = st.chat_input('输入问题...')
     if not query:
@@ -338,16 +384,17 @@ def _chat_area(filter_doc_ids: list[str] | None) -> None:
 
     with st.chat_message('assistant'):
         with st.spinner('检索中...'):
-            # 1. 生成子查询
-            sub_queries = generate_sub_queries(query)
+            # 1. 生成子查询（仅全搜模式启用 query 改写，模式来自侧边栏）
+            mode = st.session_state.get('search_mode', 'quick')
+            sub_queries = generate_sub_queries(query) if mode == 'full' else []
 
-            # 2. 检索
+            # 2. 检索（@文档选中时限定文档范围）
             try:
                 chunks = retrieve(
                     query=query,
                     sub_queries=sub_queries,
                     top_k=5,
-                    filter_doc_ids=filter_doc_ids,
+                    filter_doc_ids=mention_ids or None,
                 )
             except Exception as e:
                 st.error(f'检索失败：{e}')
@@ -372,11 +419,11 @@ def _chat_area(filter_doc_ids: list[str] | None) -> None:
         # 5. 引用卡片
         _render_citation_cards(chunks)
 
-        # 6. 显示子查询（调试用，折叠）
+        # 6. 显示子查询（调试用）
         if sub_queries:
-            with st.expander('检索子查询（调试）', expanded=False):
-                for q in sub_queries:
-                    st.caption(f'· {q}')
+            st.caption('检索子查询（调试）')
+            for q in sub_queries:
+                st.caption(f'· {q}')
 
     # 保存到历史
     st.session_state['messages'].append({
@@ -389,8 +436,8 @@ def _chat_area(filter_doc_ids: list[str] | None) -> None:
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    filter_doc_ids = _sidebar()
-    _chat_area(filter_doc_ids)
+    _sidebar()
+    _chat_area()
 
 
 if __name__ == '__main__':

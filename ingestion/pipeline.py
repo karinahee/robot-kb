@@ -165,14 +165,12 @@ def ingest_web(
     on_progress: ProgressCallback | None = None,
 ) -> str:
     """从网页 URL 入库。"""
-    from .extractors.web import fetch_and_chunk, make_doc_id
+    from .extractors.web import fetch_and_chunk
 
     _notify(on_progress, '抓取网页', 0.05)
-    md_text, chunks = fetch_and_chunk(url)
+    md_text, chunks, doc_id = fetch_and_chunk(url)
     if not md_text.strip():
         raise ValueError('网页内容为空')
-
-    doc_id = make_doc_id(url)
 
     _run_pipeline(
         doc_id=doc_id,
