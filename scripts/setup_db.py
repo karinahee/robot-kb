@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS documents (
     source_type   text        NOT NULL,
     title         text,
     source_url    text,
-    lang          text,
     content       text,
     status        text        NOT NULL DEFAULT 'processing',
     error_message text,
@@ -36,6 +35,10 @@ CREATE TABLE IF NOT EXISTS documents (
     created_at    timestamptz DEFAULT now(),
     updated_at    timestamptz DEFAULT now()
 );
+
+-- 旧库迁移：删除 lang 列（match_chunks 依赖它，先删函数再删列）
+DROP FUNCTION IF EXISTS match_chunks(vector, integer, text[]);
+ALTER TABLE IF EXISTS documents DROP COLUMN IF EXISTS lang;
 
 -- chunks 表
 CREATE TABLE IF NOT EXISTS chunks (
@@ -69,8 +72,7 @@ RETURNS TABLE (
     similarity  float,
     title       text,
     source_type text,
-    source_url  text,
-    lang        text
+    source_url  text
 )
 LANGUAGE sql STABLE AS $$
     SELECT
@@ -84,8 +86,7 @@ LANGUAGE sql STABLE AS $$
         1 - (c.embedding <=> query_embedding) AS similarity,
         d.title,
         d.source_type,
-        d.source_url,
-        d.lang
+        d.source_url
     FROM chunks c
     JOIN documents d ON d.doc_id = c.doc_id
     WHERE
@@ -110,6 +111,47 @@ CREATE TRIGGER documents_updated_at
     BEFORE UPDATE ON documents
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();
+
+-- ── 评测：对话记录 ────────────────────────────────────────────────────────────
+
+-- qa_logs 对话主表（一次问答一行）
+CREATE TABLE IF NOT EXISTS qa_logs (
+    id             uuid         PRIMARY KEY DEFAULT gen_random_uuid(),
+    env            text         NOT NULL DEFAULT 'test',  -- test / prod
+    session_id     text,
+    query          text         NOT NULL,
+    answer         text,
+    mode           text,                                   -- quick / full
+    sub_queries    jsonb        DEFAULT '[]',
+    filter_doc_ids text[],
+    model          text,
+    top_k          int,
+    latency_ms     int,
+    created_at     timestamptz  DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS qa_logs_env_created_idx ON qa_logs (env, created_at DESC);
+
+-- qa_chunks 召回明细表（每次问答召回的每个 chunk 一行）
+CREATE TABLE IF NOT EXISTS qa_chunks (
+    id           uuid         PRIMARY KEY DEFAULT gen_random_uuid(),
+    qa_id        uuid         NOT NULL REFERENCES qa_logs(id) ON DELETE CASCADE,
+    chunk_id     uuid,
+    doc_id       text,
+    title        text,                                   -- 冗余，防文档被删后丢失
+    rank         int,                                    -- 最终排名（1-based）
+    similarity   float,                                  -- 向量粗排分
+    rerank_score float,                                  -- 精排分
+    is_cited     bool         DEFAULT false,             -- 回答是否引用 [n]
+    relevance    int,                                    -- 人工标注：NULL 未标 / 0 不相关 / 1 相关 / 2 强相关
+    created_at   timestamptz  DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS qa_chunks_qa_id_idx ON qa_chunks (qa_id);
+
+-- 分环境视图
+CREATE OR REPLACE VIEW v_test_qa AS SELECT * FROM qa_logs WHERE env = 'test';
+CREATE OR REPLACE VIEW v_prod_qa AS SELECT * FROM qa_logs WHERE env = 'prod';
 """
 
 
@@ -129,7 +171,8 @@ def main() -> None:
             print('验证表结构...')
             cur.execute(
                 "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public' AND table_name IN ('documents', 'chunks')"
+                "WHERE table_schema = 'public' "
+                "AND table_name IN ('documents', 'chunks', 'qa_logs', 'qa_chunks')"
             )
             tables = [row[0] for row in cur.fetchall()]
             print(f'已创建表：{tables}')

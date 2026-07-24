@@ -7,7 +7,7 @@
 - Python 3.10+
 - Node.js 18+（仅前端需要）
 
-## 快速开始（RAG 链路 + Streamlit 测试界面）
+## 快速开始
 
 ### 1. 下载代码
 
@@ -51,7 +51,7 @@ cp .env.example .env
 | `SUPABASE_SERVICE_KEY` | Supabase service_role 密钥 | 同上 |
 | `PostgreSQL` | Supabase Session Pooler 连接串 | Supabase 项目 Settings → Database → Connection string |
 
-### 4. 初始化数据库（首次运行）
+### 4. 初始化数据库
 
 ```bash
 python scripts/setup_db.py
@@ -63,7 +63,7 @@ python scripts/setup_db.py
 streamlit run app.py
 ```
 
-浏览器打开 http://localhost:8501 ，上传 PDF 或粘贴链接即可测试完整 RAG 链路。
+浏览器打开 http://localhost:8501
 
 ## 前端（Next.js，可选）
 
@@ -75,7 +75,7 @@ npm install
 npm run dev
 ```
 
-浏览器打开 http://localhost:3000 。
+浏览器打开 http://localhost:3000 
 
 ## 目录结构
 

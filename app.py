@@ -8,6 +8,8 @@ import os
 import re
 import json
 import html
+import time
+import uuid
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -110,28 +112,24 @@ def _do_ingest(source_type: str, **kwargs) -> tuple[bool, str]:
                 file_bytes=kwargs['file_bytes'],
                 filename=kwargs['filename'],
                 title=kwargs['title'],
-                lang=kwargs['lang'],
                 on_progress=_progress_cb,
             )
         elif source_type == 'web':
             doc_id = ingest_web(
                 url=kwargs['url'],
                 title=kwargs['title'],
-                lang=kwargs['lang'],
                 on_progress=_progress_cb,
             )
         elif source_type == 'arxiv':
             doc_id = ingest_arxiv(
                 url=kwargs['url'],
                 title=kwargs['title'],
-                lang=kwargs['lang'],
                 on_progress=_progress_cb,
             )
         elif source_type == 'github':
             doc_id = ingest_github(
                 url=kwargs['url'],
                 title=kwargs['title'],
-                lang=kwargs['lang'],
                 on_progress=_progress_cb,
             )
         else:
@@ -179,10 +177,9 @@ def _render_citation_cards(chunks: list[dict]) -> None:
             f'white-space:pre-wrap;">{chunk_text}</div>',
             unsafe_allow_html=True,
         )
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         col1.caption(f'文档 ID：{c.get("doc_id", "")}')
-        col2.caption(f'语言：{c.get("lang", "")}')
-        col3.caption(f'Chunk #{c.get("chunk_index", "")}')
+        col2.caption(f'Chunk #{c.get("chunk_index", "")}')
 
 
 # ── 侧边栏 ────────────────────────────────────────────────────────────────────
@@ -236,7 +233,6 @@ def _sidebar() -> None:
 
         with st.form('ingest_form', clear_on_submit=True):
             title = st.text_input('文档标题（可选）')
-            lang  = 'zh-en'
 
             if source_type == 'pdf':
                 uploaded = st.file_uploader('上传 PDF', type=['pdf'])
@@ -263,7 +259,7 @@ def _sidebar() -> None:
             elif source_type != 'pdf' and not url_val.strip():
                 st.error('请输入 URL')
             else:
-                kwargs = {'title': title or '', 'lang': lang}
+                kwargs = {'title': title or ''}
                 if source_type == 'pdf':
                     kwargs['file_bytes'] = uploaded.read()
                     kwargs['filename']   = uploaded.name
@@ -333,6 +329,9 @@ def _chat_area() -> None:
     # 历史消息（单轮，每次刷新清空）
     if 'messages' not in st.session_state:
         st.session_state['messages'] = []
+    # 会话标识（同一浏览器会话内的问答归为一组）
+    if 'session_id' not in st.session_state:
+        st.session_state['session_id'] = str(uuid.uuid4())
 
     # 渲染历史
     for msg in st.session_state['messages']:
@@ -383,6 +382,7 @@ def _chat_area() -> None:
         st.markdown(query)
 
     with st.chat_message('assistant'):
+        t0 = time.time()
         with st.spinner('检索中...'):
             # 1. 生成子查询（仅全搜模式启用 query 改写，模式来自侧边栏）
             mode = st.session_state.get('search_mode', 'quick')
@@ -412,14 +412,41 @@ def _chat_area() -> None:
                 st.error(f'生成回答失败：{e}')
                 return
 
-        # 4. 渲染回答（带引用上标）
+        latency_ms = int((time.time() - t0) * 1000)
+
+        # 4. 落库（评测用，失败不影响问答主流程）
+        try:
+            from ingestion.store import insert_qa_log, insert_qa_chunks
+            # 从回答里解析被引用的 chunk 序号（[n] 且 n 在召回范围内）
+            cited = {
+                int(m.group(1))
+                for m in re.finditer(r'\[(\d+)\]', answer)
+                if 1 <= int(m.group(1)) <= len(chunks)
+            }
+            qa_id = insert_qa_log(
+                env='test',
+                session_id=st.session_state['session_id'],
+                query=query,
+                answer=answer,
+                mode=mode,
+                sub_queries=sub_queries,
+                filter_doc_ids=mention_ids or None,
+                model=_CHAT_MODEL,
+                top_k=5,
+                latency_ms=latency_ms,
+            )
+            insert_qa_chunks(qa_id, chunks, cited)
+        except Exception as e:
+            st.caption(f'（问答记录写入失败：{e}）')
+
+        # 5. 渲染回答（带引用上标）
         answer_html = _render_answer_with_citations(answer, chunks)
         st.markdown(answer_html, unsafe_allow_html=True)
 
-        # 5. 引用卡片
+        # 6. 引用卡片
         _render_citation_cards(chunks)
 
-        # 6. 显示子查询（调试用）
+        # 7. 显示子查询（调试用）
         if sub_queries:
             st.caption('检索子查询（调试）')
             for q in sub_queries:

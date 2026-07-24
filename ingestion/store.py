@@ -1,11 +1,12 @@
 # Supabase 数据读写封装
 #
 # 对外接口：
-#   upsert_document(doc_id, title, source_type, source_url, lang, content, metadata)
+#   upsert_document(doc_id, title, source_type, source_url, content, metadata)
 #   upsert_chunks(chunks)
 #   search_chunks(query_embedding, top_k, filter_doc_ids)
 #   list_documents()
 #   delete_document(doc_id)
+#   insert_qa_log(...) / insert_qa_chunks(...)（评测：问答记录落库）
 #
 # 所有数据库操作统一走本模块，上层不直接接触 Supabase 客户端。
 
@@ -36,7 +37,6 @@ def upsert_document(
     title: str,
     source_type: str,
     source_url: str,
-    lang: str,
     content: str,
     metadata: dict | None = None,
     status: str = 'processing',
@@ -49,7 +49,6 @@ def upsert_document(
         title:         文档标题（用户填或自动提取）
         source_type:   pdf / web / github / arxiv
         source_url:    原始来源地址或文件名
-        lang:          zh / en / zh-en
         content:       清洗后的完整文本（用于原文定位和高亮）
         metadata:      来源特有字段，如 authors、arxiv_id 等
         status:        processing / ready / failed
@@ -60,7 +59,6 @@ def upsert_document(
         'title':        title,
         'source_type':  source_type,
         'source_url':   source_url,
-        'lang':         lang,
         'content':      content,
         'metadata':     metadata or {},
         'status':       status,
@@ -86,7 +84,7 @@ def list_documents() -> list[dict]:
     resp = (
         _get_client()
         .table('documents')
-        .select('doc_id, title, source_type, source_url, lang, status, created_at')
+        .select('doc_id, title, source_type, source_url, status, created_at')
         .order('created_at', desc=True)
         .execute()
     )
@@ -96,6 +94,62 @@ def list_documents() -> list[dict]:
 def delete_document(doc_id: str) -> None:
     """删除文档，关联 chunks 由数据库 CASCADE 自动删除。"""
     _get_client().table('documents').delete().eq('doc_id', doc_id).execute()
+
+
+# ── 评测：qa_logs / qa_chunks ─────────────────────────────────────────────────
+
+def insert_qa_log(
+    env: str,
+    query: str,
+    answer: str,
+    mode: str,
+    sub_queries: list[str],
+    filter_doc_ids: list[str] | None,
+    model: str,
+    top_k: int,
+    latency_ms: int,
+    session_id: str | None = None,
+) -> str:
+    """写入一条问答记录（总账），返回 qa_id。"""
+    row = {
+        'env':            env,
+        'session_id':     session_id,
+        'query':          query,
+        'answer':         answer,
+        'mode':           mode,
+        'sub_queries':    sub_queries,
+        'filter_doc_ids': filter_doc_ids,
+        'model':          model,
+        'top_k':          top_k,
+        'latency_ms':     latency_ms,
+    }
+    resp = _get_client().table('qa_logs').insert(row).execute()
+    return resp.data[0]['id']
+
+
+def insert_qa_chunks(qa_id: str, chunks: list[dict], cited_indexes: set[int]) -> None:
+    """批量写入一次问答的召回明细（明细账）。
+
+    Args:
+        qa_id:          对应的 qa_logs.id
+        chunks:         召回的 chunk 列表，列表顺序即最终排名
+        cited_indexes:  回答中被引用的 chunk 序号集合（1-based）
+    """
+    rows = [
+        {
+            'qa_id':        qa_id,
+            'chunk_id':     str(c['chunk_id']) if c.get('chunk_id') else None,
+            'doc_id':       c.get('doc_id'),
+            'title':        c.get('title'),
+            'rank':         i,
+            'similarity':   c.get('similarity'),
+            'rerank_score': c.get('rerank_score'),
+            'is_cited':     i in cited_indexes,
+        }
+        for i, c in enumerate(chunks, 1)
+    ]
+    if rows:
+        _get_client().table('qa_chunks').insert(rows).execute()
 
 
 # ── chunks ────────────────────────────────────────────────────────────────────
@@ -143,7 +197,7 @@ def search_chunks(
         候选 chunk 列表，每条包含：
         chunk_id, doc_id, chunk_index, chunk_text,
         char_start, char_end, char_len,
-        similarity, title, source_type, source_url, lang
+        similarity, title, source_type, source_url
     """
     params: dict = {
         'query_embedding': query_embedding,

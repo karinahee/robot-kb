@@ -83,7 +83,7 @@ def retrieve(
         精排后的 chunk 列表，每条包含：
         chunk_id, doc_id, chunk_index, chunk_text,
         char_start, char_end, char_len,
-        rerank_score, title, source_type, source_url, lang
+        rerank_score, title, source_type, source_url
     """
     # 1. 合并查询列表：原始 query 始终参与，子查询去重去空
     all_queries = [query]

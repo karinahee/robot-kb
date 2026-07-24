@@ -1,10 +1,10 @@
 # 统一入库编排层
 #
 # 对外接口：
-#   ingest_pdf(path, title, lang, on_progress)
-#   ingest_web(url, title, lang, on_progress)
-#   ingest_arxiv(url, title, lang, on_progress)
-#   ingest_github(url, title, lang, on_progress)
+#   ingest_pdf(path, title, on_progress)
+#   ingest_web(url, title, on_progress)
+#   ingest_arxiv(url, title, on_progress)
+#   ingest_github(url, title, on_progress)
 #
 # 职责：
 #   调用 extractor → chunker → embedding → store
@@ -39,7 +39,6 @@ def _run_pipeline(
     title: str,
     source_type: str,
     source_url: str,
-    lang: str,
     content: str,
     chunks: list[dict],
     metadata: dict | None = None,
@@ -58,7 +57,6 @@ def _run_pipeline(
             title=title,
             source_type=source_type,
             source_url=source_url,
-            lang=lang,
             content=content,
             metadata=metadata or {},
             status='processing',
@@ -96,7 +94,6 @@ def _run_pipeline(
 def ingest_pdf(
     path: str,
     title: str,
-    lang: str,
     on_progress: ProgressCallback | None = None,
 ) -> str:
     """从本地 PDF 文件入库。
@@ -104,7 +101,6 @@ def ingest_pdf(
     Args:
         path:        PDF 文件路径
         title:       文档标题（用户填写）
-        lang:        zh / en / zh-en
         on_progress: 进度回调
 
     Returns:
@@ -130,7 +126,6 @@ def ingest_pdf(
         title=title,
         source_type='pdf',
         source_url=filename,
-        lang=lang,
         content=content,
         chunks=chunks,
         metadata={'filename': filename},
@@ -143,7 +138,6 @@ def ingest_pdf_upload(
     file_bytes: bytes,
     filename: str,
     title: str,
-    lang: str,
     on_progress: ProgressCallback | None = None,
 ) -> str:
     """从上传的文件字节入库（Streamlit file_uploader 用）。"""
@@ -151,7 +145,7 @@ def ingest_pdf_upload(
         f.write(file_bytes)
         tmp_path = f.name
     try:
-        return ingest_pdf(tmp_path, title, lang, on_progress)
+        return ingest_pdf(tmp_path, title, on_progress)
     finally:
         os.unlink(tmp_path)
 
@@ -161,7 +155,6 @@ def ingest_pdf_upload(
 def ingest_web(
     url: str,
     title: str,
-    lang: str,
     on_progress: ProgressCallback | None = None,
 ) -> str:
     """从网页 URL 入库。"""
@@ -177,7 +170,6 @@ def ingest_web(
         title=title,
         source_type='web',
         source_url=url,
-        lang=lang,
         content=md_text,
         chunks=chunks,
         metadata={'url': url},
@@ -191,7 +183,6 @@ def ingest_web(
 def ingest_arxiv(
     url: str,
     title: str,
-    lang: str,
     on_progress: ProgressCallback | None = None,
 ) -> str:
     """从 arXiv URL 入库（场景 A：用户粘贴 arXiv 链接）。"""
@@ -207,7 +198,6 @@ def ingest_arxiv(
         title=title or meta.get('title', doc_id),
         source_type='arxiv',
         source_url=url,
-        lang=lang,
         content=content,
         chunks=chunks,
         metadata=meta,
@@ -221,7 +211,6 @@ def ingest_arxiv(
 def ingest_github(
     url: str,
     title: str,
-    lang: str,
     on_progress: ProgressCallback | None = None,
 ) -> str:
     """从 GitHub 仓库入库（一个仓库合并为一篇文档）。"""
@@ -237,7 +226,6 @@ def ingest_github(
         title=title,
         source_type='github',
         source_url=url,
-        lang=lang,
         content=content,
         chunks=chunks,
         metadata={'repo_url': url},

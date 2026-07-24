@@ -4,7 +4,6 @@ export interface SourceDoc {
   docId: string;
   title: string;
   sourceType: 'pdf' | 'web' | 'arxiv' | 'github';
-  lang: string;
   chunkCount: number;
 }
 
@@ -28,21 +27,18 @@ export const mockSources: SourceDoc[] = [
     docId: 'pdf_robocon_2026',
     title: '2026 ROBOCON 仿生足式机器人挑战赛规则',
     sourceType: 'pdf',
-    lang: 'zh',
     chunkCount: 86,
   },
   {
     docId: 'pdf_learning_agile',
     title: 'Learning Agile Robotic Locomotion Skills by Imitating Animals',
     sourceType: 'pdf',
-    lang: 'en',
     chunkCount: 134,
   },
   {
     docId: 'arxiv_2004_00784',
     title: 'Learning bipedal robot locomotion',
     sourceType: 'arxiv',
-    lang: 'en',
     chunkCount: 92,
   },
 ];
